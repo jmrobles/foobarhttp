@@ -11,35 +11,45 @@ import (
 )
 
 func main() {
+	var assetsPath string
+	var proxyMap map[string]string
+	var err error
+
 	testCORS := flag.Bool("testcors", false, "Dump request headers and check if CORS is requested")
 	port := flag.Int("port", 10000, "Port to listen")
 	tlsCert := flag.String("tlscert", "", "SSL certificate to use HTTPS")
 	tlsKey := flag.String("tlskey", "", "SSL certificate private key")
-	relAssetsPath := flag.String("assets", "assets", "Assets path")
+	agstatic := flag.String("agstatic", "", "Angular static serve")
+	invproxy := flag.String("invproxy", "", "Inverse proxy access. Ej: /api|http://localhost:8000,/static|http://localhost:9000")
+
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s [options] <path>\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
-	if flag.NArg() == 0 {
-		flag.Usage()
-		fmt.Fprint(os.Stderr, "need to specify the path to serve\n")
-		os.Exit(-1)
-	}
-
-	path := flag.Arg(0)
-	assetsPath := filepath.Join(path, *relAssetsPath)
-	// Check paths
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		log.Fatalf("Path directory \"%s\" not exists", path)
-	}
-	if _, err := os.Stat(assetsPath); os.IsNotExist(err) {
-		log.Fatalf("Assets path directory \"%s\" not exists", assetsPath)
+	if *invproxy != "" {
+		proxyMap, err = parseProxyMap(*invproxy)
+		if err != nil {
+			log.Fatalf("Can't parse inverse proxy map setup: %s", err)
+		}
 	}
 	log.Printf("FooBarHttp")
 	log.Printf("Listening at :%d", *port)
 	log.Printf("Serving path: \"%s\"", flag.Arg(0))
-	log.Printf("Assets path: \"%s\"", assetsPath)
+
+	if *agstatic != "" {
+		assetsPath = filepath.Join(*agstatic, "assets")
+		// Check paths
+		if _, err := os.Stat(*agstatic); os.IsNotExist(err) {
+			log.Fatalf("Path directory \"%s\" not exists", *agstatic)
+		}
+		if _, err := os.Stat(assetsPath); os.IsNotExist(err) {
+			log.Fatalf("Assets path directory \"%s\" not exists", assetsPath)
+		}
+		log.Printf("Serving Angular dist static from: \"%s\"", *agstatic)
+		log.Printf("with assets path: \"%s\"", assetsPath)
+	}
+
 	// Handlers
 	//fs := http.FileServer(http.Dir(assetsPath))
 	//http.HandleFunc(fmt.Sprintf("/%s", *relAssetsPath), http.StripPrefix(fmt.Sprintf("/%s/", *relAssetsPath), fs))
@@ -53,11 +63,31 @@ func main() {
 			}
 			log.Printf("--- End headers ---")
 		}
-		if r.URL.Path == "" || r.URL.Path == "/" || !strings.Contains(r.URL.Path, ".") {
-			http.ServeFile(w, r, filepath.Join(path, "index.html"))
-		} else {
-			http.ServeFile(w, r, filepath.Join(path, r.URL.Path))
+		// 1. Angular dist server?
+		if *agstatic != "" {
+			if r.URL.Path == "" || r.URL.Path == "/" || !strings.Contains(r.URL.Path, ".") {
+				http.ServeFile(w, r, filepath.Join(*agstatic, "index.html"))
+			} else {
+				http.ServeFile(w, r, filepath.Join(*agstatic, r.URL.Path))
+			}
 		}
+		// 2. Inverse proxy mode?
+		if len(proxyMap) > 0 {
+			for k, v := range proxyMap {
+				if strings.HasPrefix(r.URL.Path, k) {
+					log.Printf("DEBUG: proxy entry found: \"%s\"", k)
+					err = serveProxyRequest(w, r, v)
+					if err != nil {
+						log.Printf("WARN: Proxy error: %s", err)
+					}
+					break
+				}
+			}
+		}
+		// 3. 404
+		w.WriteHeader(404)
+		w.Write([]byte("Not found"))
+
 	})
 	if *tlsKey != "" && *tlsCert != "" {
 		log.Printf("Enabling HTTPS")
